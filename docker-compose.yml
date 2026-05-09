@@ -1,0 +1,139 @@
+version: "3.9"
+
+services:
+  app:
+    build:
+      context: .
+      target: production
+    container_name: onboarding_app
+    ports:
+      - "8002:8002"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://onboard_user:onboard_pass@postgres:5432/onboarding_db
+      - REDIS_URL=redis://redis:6379/1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - docs_data:/data/documents
+      - screenshots_data:/data/screenshots
+      - logs_data:/app/logs
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8002 --workers 2
+    restart: unless-stopped
+    networks:
+      - onboarding_net
+
+  worker:
+    build:
+      context: .
+      target: production
+    container_name: onboarding_worker
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://onboard_user:onboard_pass@postgres:5432/onboarding_db
+      - REDIS_URL=redis://redis:6379/1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - docs_data:/data/documents
+      - screenshots_data:/data/screenshots
+      - logs_data:/app/logs
+    command: celery -A app.tasks.celery_app.celery_app worker --loglevel=info --concurrency=4
+    restart: unless-stopped
+    networks:
+      - onboarding_net
+
+  beat:
+    build:
+      context: .
+      target: production
+    container_name: onboarding_beat
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/1
+    depends_on:
+      - redis
+    command: celery -A app.tasks.celery_app.celery_app beat --loglevel=info --scheduler celery.beat:PersistentScheduler
+    restart: unless-stopped
+    networks:
+      - onboarding_net
+
+  flower:
+    build:
+      context: .
+      target: production
+    container_name: onboarding_flower
+    ports:
+      - "5556:5555"
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/1
+    depends_on:
+      - redis
+    command: celery -A app.tasks.celery_app.celery_app flower --port=5555 --broker=redis://redis:6379/1
+    restart: unless-stopped
+    networks:
+      - onboarding_net
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: onboarding_redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - onboarding_net
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: onboarding_postgres
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: onboarding_db
+      POSTGRES_USER: onboard_user
+      POSTGRES_PASSWORD: onboard_pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U onboard_user -d onboarding_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - onboarding_net
+
+volumes:
+  postgres_data:
+    name: onboarding_postgres_data
+  redis_data:
+    name: onboarding_redis_data
+  docs_data:
+    name: onboarding_docs_data
+  screenshots_data:
+    name: onboarding_screenshots_data
+  logs_data:
+    name: onboarding_logs_data
+
+networks:
+  onboarding_net:
+    name: onboarding_network
+    driver: bridge
